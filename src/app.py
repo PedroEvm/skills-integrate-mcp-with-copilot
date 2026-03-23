@@ -5,11 +5,13 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+import json
+import secrets
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -18,6 +20,19 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+teachers_file = current_dir / "teachers.json"
+
+
+def load_teacher_credentials() -> dict:
+    """Load teacher credentials from a JSON file in the project root."""
+    with teachers_file.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+    return data.get("teachers", {})
+
+
+teacher_credentials = load_teacher_credentials()
+active_teacher_sessions = {}
 
 # In-memory activity database
 activities = {
@@ -88,9 +103,55 @@ def get_activities():
     return activities
 
 
+@app.post("/auth/login")
+def teacher_login(username: str, password: str):
+    """Authenticate teachers and issue a lightweight in-memory session token."""
+    expected_password = teacher_credentials.get(username)
+    if expected_password is None or expected_password != password:
+        raise HTTPException(status_code=401, detail="Invalid teacher credentials")
+
+    token = secrets.token_urlsafe(24)
+    active_teacher_sessions[token] = username
+    return {"message": "Teacher login successful", "token": token, "username": username}
+
+
+@app.post("/auth/logout")
+def teacher_logout(x_teacher_token: str | None = Header(default=None)):
+    """Invalidate the teacher session token."""
+    if x_teacher_token and x_teacher_token in active_teacher_sessions:
+        active_teacher_sessions.pop(x_teacher_token)
+    return {"message": "Logged out"}
+
+
+@app.get("/auth/me")
+def get_authenticated_teacher(x_teacher_token: str | None = Header(default=None)):
+    """Return current authenticated teacher for UI session restoration."""
+    username = active_teacher_sessions.get(x_teacher_token or "")
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"username": username}
+
+
+def require_teacher_token(x_teacher_token: str | None) -> str:
+    """Ensure the request is from an authenticated teacher."""
+    username = active_teacher_sessions.get(x_teacher_token or "")
+    if not username:
+        raise HTTPException(
+            status_code=401,
+            detail="Teacher authentication required for this action"
+        )
+    return username
+
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(
+    activity_name: str,
+    email: str,
+    x_teacher_token: str | None = Header(default=None)
+):
     """Sign up a student for an activity"""
+    require_teacher_token(x_teacher_token)
+
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -111,8 +172,14 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(
+    activity_name: str,
+    email: str,
+    x_teacher_token: str | None = Header(default=None)
+):
     """Unregister a student from an activity"""
+    require_teacher_token(x_teacher_token)
+
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
